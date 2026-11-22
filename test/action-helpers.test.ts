@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { resolvePullRequestNumber } from '../src/action/pull-request';
+import { parseTimeoutSeconds } from '../src/action/inputs';
+import { isForkPullRequest, resolvePullRequestNumber } from '../src/action/pull-request';
 import { parseMode } from '../src/core';
 
 describe('resolvePullRequestNumber', () => {
@@ -32,5 +33,23 @@ describe('parseMode', () => {
 
   it('відхиляє невідомий режим', () => {
     expect(() => parseMode('delete')).toThrow('Невідомий режим "delete"');
+  });
+});
+
+describe('isForkPullRequest', () => {
+  it('порівнює репозиторій PR з базовим', () => {
+    const repository = { full_name: 'owner/demo' };
+    expect(isForkPullRequest({ repository, pull_request: { number: 1, head: { repo: { full_name: 'owner/demo' } } } })).toBe(false);
+    expect(isForkPullRequest({ repository, pull_request: { number: 1, head: { repo: { full_name: 'other/demo' } } } })).toBe(true);
+    expect(isForkPullRequest({ repository, workflow_run: { head_repository: { full_name: 'other/demo' } } })).toBe(true);
+    expect(isForkPullRequest({})).toBe(false);
+  });
+});
+
+describe('parseTimeoutSeconds', () => {
+  it('порожнє значення — 300, некоректне — помилка', () => {
+    expect(parseTimeoutSeconds('')).toBe(300);
+    expect(parseTimeoutSeconds('45')).toBe(45);
+    expect(() => parseTimeoutSeconds('-1')).toThrow('timeout-seconds');
   });
 });

@@ -19,32 +19,75 @@ Eval-фреймворк для оцінювання достовірності �
 Головний принцип: рішення ухвалюють **детерміновані перевірки** — компілятор, лінтер,
 тести, AST. LLM дає лише допоміжний сигнал.
 
-| Тип (`kind`) | Що робить                          | Приклади                                   |
-| ------------ | ---------------------------------- | ------------------------------------------ |
-| `execution`  | запускає код                       | `tsc --noEmit`, ESLint, тести (етап 2)     |
-| `static`     | аналізує текст або AST без запуску | `suggestion-present`, ts-morph (етап 3)    |
-| `model`      | використовує LLM                   | LLM-as-a-judge (етап 3)                    |
-| `human`      | мітка від людини                   | розмітка датасету (етап 5)                 |
+| Тип (`kind`) | Що робить                          | Оцінювачі                                       |
+| ------------ | ---------------------------------- | ----------------------------------------------- |
+| `execution`  | запускає код                       | `typecheck`, `lint`, `tests`                    |
+| `static`     | аналізує текст або AST без запуску | `suggestion-present`, `suggestion-applies`; ts-morph (етап 3) |
+| `model`      | використовує LLM                   | LLM-as-a-judge (етап 3)                         |
+| `human`      | мітка від людини                   | розмітка датасету (етап 5)                      |
 
 Одне ядро (`src/core`) працює у двох режимах:
 
 - **онлайн** — GitHub Action оцінює коментарі рев'ю в pull request (`src/action`);
 - **офлайн** — CLI-харнес проганяє розмічений датасет і рахує метрики (`src/cli`, етап 5).
 
-## Стан: етап 1
+## Стан: етап 2
 
-Зараз є один оцінювач — `suggestion-present`. Він перевіряє, чи містить коментар
-блок ```` ```suggestion ````. Лише таку конкретну зміну коду можна буде застосувати
-й перевірити компілятором і тестами на етапі 2.
+### Оцінювачі
 
-Що робить Action під час запуску:
+| Оцінювач             | Що перевіряє                                                       | Результат |
+| -------------------- | ------------------------------------------------------------------ | --------- |
+| `suggestion-present` | чи є в коментарі блок ```` ```suggestion ````                       | `pass` / `skip` |
+| `suggestion-applies` | чи можна застосувати suggestion до файлу в коміті коментаря        | `fail`, якщо рядків немає, файлу немає або suggestion нічого не змінює |
+| `typecheck`          | перевірка типів **до** і **після** зміни                           | `fail`, якщо з'явилася нова помилка TypeScript |
+| `lint`               | ESLint для зміненого файлу до і після зміни                        | `fail` для нової помилки, `pass` з оцінкою 0.5 для нового попередження |
+| `tests`              | тести, пов'язані зі зміненим файлом, до і після зміни              | `fail`, якщо хоча б один тест проходив до зміни і падає після неї |
+
+Execution-оцінювачі порівнюють стан «до» і «після», а не лише «після». Тому старі помилки
+проєкту не роблять рекомендацію поганою: важливо лише, що **додала** сама зміна.
+Помилки порівнюються без номерів рядків, бо suggestion зсуває рядки.
+
+`tests` порівнює **окремі тести** з JSON-звітів Vitest або Jest (`{report}` у команді).
+Тест, який падав ще до зміни (наприклад, бо немає БД), на результат не впливає.
+Якщо звіту немає, оцінювач порівнює лише коди виходу команди.
+
+Коли результат не можна отримати чесно, оцінювач повертає `skip`, а не `fail`:
+команда не працює навіть без зміни, тести падали ще до зміни, вийшов ліміт часу,
+змінено не код JavaScript/TypeScript.
+
+### Як працює запуск коду
+
+1. Для коміту, до якого залишено коментар, створюється `git worktree` «до». Він один на коміт.
+   Якщо коміту немає локально, Action робить `git fetch` цього коміту.
+2. Для кожної рекомендації створюється окремий `git worktree` «після», і в ньому
+   застосовується suggestion. Кінці рядків `\r\n` і фінальний перенос зберігаються.
+3. В обидва worktree додається посилання на `node_modules` з основного checkout.
+   Тому залежності треба встановити **до** кроку Review Evals.
+4. Команди запускаються по черзі, з лімітом часу. Після ліміту Action зупиняє всю групу процесів.
+   Результати «до» кешуються, тому команда «до» запускається один раз на коміт.
+5. Наприкінці всі worktree видаляються.
+
+### Команди за замовчуванням
+
+Action визначає команди з `package.json` основного checkout:
+
+| Перевірка   | Як визначається                                                                    |
+| ----------- | ---------------------------------------------------------------------------------- |
+| `typecheck` | скрипт `typecheck` (або `type-check`, `check-types`, `tsc`), інакше `tsc --noEmit`, якщо є `typescript` |
+| `lint`      | `eslint`, якщо він є в залежностях. Action сам додає `--format json -- <файл>`     |
+| `tests`     | `vitest related --run --passWithNoTests --reporter=json --outputFile={report} {files}` або `jest --findRelatedTests --passWithNoTests --json --outputFile={report} {files}` |
+
+Менеджер пакетів береться з поля `packageManager` або з lock-файлу (pnpm, yarn, npm).
+Кожну команду можна замінити через input, а значення `off` вимикає перевірку.
+
+### Що робить Action під час запуску
 
 1. Знаходить номер PR: з `payload.pull_request` або з `payload.workflow_run.pull_requests[0]`.
 2. Читає всі review comments цього PR.
 3. Пропускає відповіді, а також коментарі, під якими вже є відповідь Review Evals
    (з прихованим маркером `<!-- review-evals -->`). Тому повторний запуск не дублює відповіді.
 4. Для кожного нового коментаря запускає всі оцінювачі й відповідає під ним чек-листом.
-5. Пише Job Summary з таблицею «файл:рядки | джерело | результати оцінювачів».
+5. Пише Job Summary з таблицею «файл:рядки | джерело | результати оцінювачів» і списком команд.
 
 Джерело визначається за автором: `user.type === 'Bot'` → `LLM`, інакше → `людина`.
 
@@ -56,6 +99,10 @@ Eval-фреймворк для оцінювання достовірності �
 Джерело: **LLM (`claude[bot]`)**
 
 - ✔ `suggestion-present` — Коментар містить блок suggestion (рядків коду: 1).
+- ✔ `suggestion-applies` — Suggestion застосовується до src/App.tsx:12.
+- ✘ `typecheck` — Зміна додає помилок TypeScript: 1. Перша: TS2322 у src/App.tsx:12: Type 'string' is not assignable to type 'number'.
+- ✔ `lint` — Зміна не додає проблем ESLint.
+- – `tests` — Немає тестів, пов'язаних зі зміненим файлом.
 ```
 
 ## Як підключити
@@ -86,31 +133,99 @@ concurrency:
 jobs:
   evaluate:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
       - uses: <OWNER>/review-evals@main
         with:
-          mode: annotate
+          timeout-seconds: 300
 ```
 
-Що треба знати:
+### Приклад для pnpm (демо-репозиторій Pampojo)
+
+У Pampojo залежності встановлює локальний composite action `./.github/actions/setup`
+(pnpm, Node з `.nvmrc`, `pnpm install`).
+
+`next.config.ts` у Pampojo перевіряє env через `parseEnv`, тому без `DATABASE_URL`
+і `BETTER_AUTH_SECRET` падає вже `next typegen`. Для перевірки типів досить фіктивних
+значень: це не секрети, і БД з ними недоступна. Тому job виглядає так:
+
+```yaml
+  evaluate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      DATABASE_URL: postgres://review-evals:placeholder@127.0.0.1:5432/none
+      BETTER_AUTH_SECRET: review-evals-placeholder-secret-not-real-0000
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup
+
+      - uses: Holodniak-Oleksii/review-evals@main
+        with:
+          timeout-seconds: 300
+```
+
+Команди визначаються автоматично: `pnpm run typecheck`, `pnpm exec eslint`,
+`pnpm exec vitest related --run --passWithNoTests --reporter=json --outputFile={report} {files}`.
+
+Тести Pampojo, яким потрібна БД, з фіктивним `DATABASE_URL` падають і до, і після зміни
+(`ECONNREFUSED`). `tests` їх не враховує і порівнює лише ті тести, що працюють без БД.
+Справжні секрети БД сюди навмисно не передаються: БД спільна з production.
+Browser-тести потребують `pnpm exec playwright install --with-deps chromium`.
+
+### Що треба знати
 
 - `workflow_run` спрацьовує, лише коли файл workflow є в гілці за замовчуванням (`main`).
   Поки файл є лише в гілці PR, працюватиме тільки тригер `pull_request_review`.
 - Назва в `workflows: ["Claude Auto Review"]` має точно збігатися з полем `name:` workflow рев'ю.
+- При `workflow_run` `actions/checkout` без `ref` бере `main`, а не гілку PR. Тому в прикладі
+  є `ref: head_sha`: залежності встановлюються саме для коду PR.
 - Події, які створює `GITHUB_TOKEN`, не запускають інші workflow. Тому відповіді Review Evals
   не запускають його повторно. З тієї ж причини, якщо рев'ю пише коментарі через `GITHUB_TOKEN`,
   подія `pull_request_review` не прийде. Для цього випадку і є тригер `workflow_run`.
-- Для PR з форків `workflow_run.pull_requests` порожній, а токен у `pull_request_review`
-  має лише право читання. Етап 1 розрахований на PR з того самого репозиторію.
 - `concurrency` не дає двом запускам для одного PR працювати одночасно й відповісти двічі.
+- Кожна suggestion — це окремий запуск перевірки типів, ESLint і тестів. Для великого PR
+  це може тривати довго, тому в прикладі є `timeout-minutes: 60`.
+
+### Безпека
+
+Execution-оцінювачі **запускають код із PR**: скрипти `package.json`, конфіги ESLint і Vitest.
+`workflow_run` і `pull_request_review` працюють з токеном, який може писати в PR.
+
+- Для PR з форків запуск коду вимкнено (`allow-forks: false`). Для них `workflow_run.pull_requests`
+  порожній, а токен у `pull_request_review` має лише право читання.
+- Команди отримують env без токенів: Action прибирає `INPUT_*`, `ACTIONS_*`, `GITHUB_TOKEN`, `GH_TOKEN`.
+- `persist-credentials: false` у checkout не залишає токен у `.git/config`, який може прочитати код PR.
+  Для `git fetch` Action передає токен окремо, через env процесу git.
+- Секрети репозиторію не передавайте в цей workflow.
 
 ### Вхідні параметри
 
-| Параметр       | За замовчуванням      | Опис                                                                  |
-| -------------- | --------------------- | --------------------------------------------------------------------- |
-| `github-token` | `${{ github.token }}` | Токен для GitHub API. Потрібен дозвіл `pull-requests: write`.         |
-| `mode`         | `annotate`            | `annotate` — відповідати під коментарями. `filter` і `hybrid` — етап 4; зараз вони працюють як `annotate` і пишуть попередження. |
+| Параметр            | За замовчуванням      | Опис |
+| ------------------- | --------------------- | ---- |
+| `github-token`      | `${{ github.token }}` | Токен для GitHub API. Потрібен дозвіл `pull-requests: write`. |
+| `mode`              | `annotate`            | `annotate` — відповідати під коментарями. `filter` і `hybrid` — етап 4; зараз вони працюють як `annotate` і пишуть попередження. |
+| `typecheck-command` | автоматично           | Команда перевірки типів. `off` вимикає. |
+| `lint-command`      | автоматично           | Команда ESLint без аргументів, наприклад `pnpm exec eslint`. `off` вимикає. |
+| `test-command`      | автоматично           | Команда тестів; `{files}` замінюється на змінені файли. `off` вимикає. |
+| `timeout-seconds`   | `300`                 | Ліміт часу для однієї команди. |
+| `allow-forks`       | `false`               | Запускати код із PR з форків. Небезпечно. |
 
 ## Розробка
 
@@ -143,7 +258,8 @@ TypeScript закріплено на версії 6.0. TypeScript 7 (натив�
 ### Як додати оцінювача
 
 1. Створіть `src/core/graders/<name>.ts`, який реалізує інтерфейс `Grader` з `src/core/types.ts`.
-2. Додайте його в `defaultGraders` у `src/core/graders/index.ts`.
+   Execution-оцінювачу допоможуть `runExecutionCheck` і `runBeforeAfter` з `graders/execution.ts`.
+2. Додайте його в `createDefaultGraders` у `src/core/graders/index.ts`.
 3. Додайте тест у `test/`.
 
 Якщо оцінювач кидає помилку, ядро не зупиняється: результат стає `skip` з текстом помилки.
@@ -153,12 +269,15 @@ TypeScript закріплено на версії 6.0. TypeScript 7 (натив�
 ```
 action.yml              опис Action (node24 → dist/index.js)
 src/core/               ядро, спільне для онлайн- і офлайн-режиму
-  types.ts              Recommendation, GradeResult, EvalContext, Grader, Evaluation
+  types.ts              Recommendation, GradeResult, Grader, Workspace, Sandbox
   parse.ts              parseRecommendation, extractSuggestion
   selection.ts          які коментарі оцінювати
   evaluate.ts           запуск оцінювачів
+  config.ts             автовизначення команд перевірок
   report.ts, marker.ts  текст відповіді та Job Summary
   mode.ts               annotate | filter | hybrid
+  workspace/            git worktree «до» і «після», застосування suggestion, запуск команд
+  checks/               розбір виводу tsc і ESLint, різниця «до/після»
   graders/              оцінювачі
 src/action/             онлайн-режим: тонкий шар над GitHub API
 src/cli/                офлайн-режим (етап 5)
@@ -170,8 +289,6 @@ dist/                   зібраний Action (комітиться)
 
 ## Наступні етапи
 
-2. **Execution-оцінювачі.** Застосувати suggestion у git worktree гілки PR. Запустити
-   `tsc --noEmit`, ESLint і тести до і після зміни, з таймаутами.
 3. **Static і model-оцінювачі.** ts-morph: чи існують символи та пакети, на які посилається
    рекомендація. LLM перетворює текстовий коментар на зміну; LLM-as-a-judge.
 4. **Агрегатор і режими.** Правила, потім логістична регресія (`weights.json`).

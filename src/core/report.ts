@@ -1,3 +1,4 @@
+import type { ExecutionCommands } from './config';
 import { MARKER } from './marker';
 import type { Mode } from './mode';
 import type { Evaluation, GradeStatus, Recommendation, RecommendationSource } from './types';
@@ -49,6 +50,7 @@ export interface RunSummary {
   evaluations: Evaluation[];
   alreadyEvaluated: number;
   failed: number;
+  commands?: ExecutionCommands;
 }
 
 export function renderSummary(summary: RunSummary): string {
@@ -60,6 +62,7 @@ export function renderSummary(summary: RunSummary): string {
   if (summary.failed > 0) stats.push(`Помилок: ${summary.failed}.`);
 
   const lines = [`## Review Evals — PR #${summary.pullNumber}`, '', stats.join(' '), ''];
+  if (summary.commands) lines.push(renderCommands(summary.commands), '');
 
   if (summary.evaluations.length === 0) {
     lines.push('_Нових коментарів для оцінювання немає._');
@@ -75,6 +78,15 @@ export function renderSummary(summary: RunSummary): string {
   }
 
   return lines.join('\n');
+}
+
+function renderCommands(commands: ExecutionCommands): string {
+  const describe = (command: string | null) => (command ? `\`${command}\`` : 'вимкнено');
+  return [
+    `Команди: typecheck — ${describe(commands.typecheck)};`,
+    `lint — ${describe(commands.lint)};`,
+    `tests — ${describe(commands.test)}.`,
+  ].join(' ');
 }
 
 function cell(text: string): string {

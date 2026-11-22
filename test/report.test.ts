@@ -75,6 +75,21 @@ describe('renderSummary', () => {
     expect(md).toContain('`a\\|b.ts:10`');
   });
 
+  it('показує команди перевірок', () => {
+    const md = renderSummary({
+      pullNumber: 1,
+      mode: 'annotate',
+      evaluations: [],
+      alreadyEvaluated: 0,
+      failed: 0,
+      commands: { typecheck: 'pnpm run typecheck', lint: 'pnpm exec eslint', test: null },
+    });
+
+    expect(md).toContain(
+      'Команди: typecheck — `pnpm run typecheck`; lint — `pnpm exec eslint`; tests — вимкнено.',
+    );
+  });
+
   it('повідомляє, що нових коментарів немає', () => {
     const md = renderSummary({ pullNumber: 3, mode: 'annotate', evaluations: [], alreadyEvaluated: 4, failed: 1 });
 

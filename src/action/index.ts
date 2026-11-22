@@ -1,23 +1,28 @@
 import * as core from '@actions/core';
 import * as github from '@actions/github';
 import {
-  defaultGraders,
+  createDefaultGraders,
+  detectCommands,
   errorMessage,
   evaluate,
-  parseMode,
+  formatLocation,
   parseRecommendation,
   renderReply,
   renderSummary,
+  resolveCommands,
   selectPendingComments,
   type Evaluation,
 } from '../core';
-import { resolvePullRequestNumber } from './pull-request';
+import { readInputs } from './inputs';
+import { isForkPullRequest, resolvePullRequestNumber } from './pull-request';
+import { createWorkspace } from './workspace';
+
+const STATUS_ICON = { pass: '✔', fail: '✘', skip: '–' } as const;
 
 async function run(): Promise<void> {
-  const token = core.getInput('github-token', { required: true });
-  const mode = parseMode(core.getInput('mode'));
-  if (mode !== 'annotate') {
-    core.warning(`Режим "${mode}" ще не реалізовано (етап 4). Працюю в режимі annotate.`);
+  const inputs = readInputs();
+  if (inputs.mode !== 'annotate') {
+    core.warning(`Режим "${inputs.mode}" ще не реалізовано (етап 4). Працюю в режимі annotate.`);
   }
 
   const { context } = github;
@@ -31,7 +36,7 @@ async function run(): Promise<void> {
   }
 
   const { owner, repo } = context.repo;
-  const octokit = github.getOctokit(token);
+  const octokit = github.getOctokit(inputs.token);
 
   const comments = await octokit.paginate(octokit.rest.pulls.listReviewComments, {
     owner,
@@ -45,37 +50,60 @@ async function run(): Promise<void> {
       `вже оцінено ${alreadyEvaluated.length}.`,
   );
 
-  const ctx = { repoDir: process.env.GITHUB_WORKSPACE ?? process.cwd() };
+  const repoDir = process.env.GITHUB_WORKSPACE ?? process.cwd();
+  const commands = resolveCommands(detectCommands(repoDir), inputs.commands);
+  core.info(`Команди: typecheck=${commands.typecheck}, lint=${commands.lint}, tests=${commands.test}`);
+
+  const graders = createDefaultGraders(commands);
+  const { workspace, dispose } = createWorkspace({
+    repoDir,
+    token: inputs.token,
+    serverUrl: context.serverUrl,
+    runId: context.runId,
+    timeoutMs: inputs.timeoutMs,
+    fork: isForkPullRequest(context.payload),
+    allowForks: inputs.allowForks,
+  });
+
   const evaluations: Evaluation[] = [];
   const failures: string[] = [];
 
-  for (const comment of pending) {
-    try {
-      const evaluation = await evaluate(parseRecommendation(comment), defaultGraders, ctx);
-      await octokit.rest.pulls.createReplyForReviewComment({
-        owner,
-        repo,
-        pull_number: pullNumber,
-        comment_id: comment.id,
-        body: renderReply(evaluation),
+  try {
+    for (const comment of pending) {
+      const rec = parseRecommendation(comment);
+      await core.group(`Коментар ${comment.id} (${formatLocation(rec)})`, async () => {
+        try {
+          const evaluation = await evaluate(rec, graders, { repoDir, workspace });
+          for (const r of evaluation.results) core.info(`${STATUS_ICON[r.status]} ${r.grader}: ${r.evidence}`);
+          await octokit.rest.pulls.createReplyForReviewComment({
+            owner,
+            repo,
+            pull_number: pullNumber,
+            comment_id: comment.id,
+            body: renderReply(evaluation),
+          });
+          evaluations.push(evaluation);
+          core.info('Відповідь опубліковано.');
+        } catch (error) {
+          const message = `Коментар ${comment.id}: ${errorMessage(error)}`;
+          failures.push(message);
+          core.error(message);
+        }
       });
-      evaluations.push(evaluation);
-      core.info(`Коментар ${comment.id}: відповідь опубліковано.`);
-    } catch (error) {
-      const message = `Коментар ${comment.id}: ${errorMessage(error)}`;
-      failures.push(message);
-      core.error(message);
     }
+  } finally {
+    await dispose().catch((error: unknown) => core.warning(`Не вдалося прибрати робочі теки: ${errorMessage(error)}`));
   }
 
   await core.summary
     .addRaw(
       renderSummary({
         pullNumber,
-        mode,
+        mode: inputs.mode,
         evaluations,
         alreadyEvaluated: alreadyEvaluated.length,
         failed: failures.length,
+        commands,
       }),
       true,
     )

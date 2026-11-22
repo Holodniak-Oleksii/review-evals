@@ -10,6 +10,26 @@ inputs:
     description: annotate | filter | hybrid
     required: false
     default: annotate
+  typecheck-command:
+    description: Команда перевірки типів. Порожньо — визначити автоматично, off — вимкнути.
+    required: false
+    default: ''
+  lint-command:
+    description: Команда ESLint без аргументів (Action додає --format json і файл). Порожньо — автоматично, off — вимкнути.
+    required: false
+    default: ''
+  test-command:
+    description: Команда тестів, {files} замінюється на змінені файли. Порожньо — автоматично, off — вимкнути.
+    required: false
+    default: ''
+  timeout-seconds:
+    description: Ліміт часу для однієї команди, секунд.
+    required: false
+    default: '300'
+  allow-forks:
+    description: Запускати код із PR з форків (небезпечно).
+    required: false
+    default: 'false'
 
 runs:
   using: node24

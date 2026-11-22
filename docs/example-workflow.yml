@@ -18,8 +18,20 @@ concurrency:
 jobs:
   evaluate:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
       - uses: <OWNER>/review-evals@main
         with:
-          mode: annotate
+          timeout-seconds: 300

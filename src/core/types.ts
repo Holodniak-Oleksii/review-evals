@@ -22,8 +22,33 @@ export interface GradeResult {
   evidence: string;
 }
 
+export interface CommandResult {
+  command: string;
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+  durationMs: number;
+}
+
+export interface Sandbox {
+  before: string;
+  after: string;
+  files: string[];
+}
+
+export type SandboxResult =
+  | { ok: true; sandbox: Sandbox }
+  | { ok: false; status: 'fail' | 'skip'; reason: string };
+
+export interface Workspace {
+  prepare(rec: Recommendation): Promise<SandboxResult>;
+  run(dir: string, command: string): Promise<CommandResult>;
+}
+
 export interface EvalContext {
   repoDir: string;
+  workspace?: Workspace;
 }
 
 export type GraderKind = 'execution' | 'static' | 'model' | 'human';

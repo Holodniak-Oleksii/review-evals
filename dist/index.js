@@ -32187,7 +32187,7 @@ function exportVariable(name, val) {
  * ```
  */
 function core_setSecret(secret) {
-    issueCommand('add-mask', {}, secret);
+    command_issueCommand('add-mask', {}, secret);
 }
 /**
  * Prepends inputPath to the PATH (for this action and future actions)
@@ -32350,13 +32350,13 @@ function info(message) {
  * @param name The name of the output group
  */
 function startGroup(name) {
-    issue('group', name);
+    command_issue('group', name);
 }
 /**
  * End an output group.
  */
 function endGroup() {
-    issue('endgroup');
+    command_issue('endgroup');
 }
 /**
  * Wrap an asynchronous function call in a group.
@@ -37596,6 +37596,8 @@ function renderSummary(summary) {
     if (summary.failed > 0)
         stats.push(`Помилок: ${summary.failed}.`);
     const lines = [`## Review Evals — PR #${summary.pullNumber}`, '', stats.join(' '), ''];
+    if (summary.commands)
+        lines.push(renderCommands(summary.commands), '');
     if (summary.evaluations.length === 0) {
         lines.push('_Нових коментарів для оцінювання немає._');
         return lines.join('\n');
@@ -37609,19 +37611,298 @@ function renderSummary(summary) {
     }
     return lines.join('\n');
 }
+function renderCommands(commands) {
+    const describe = (command) => (command ? `\`${command}\`` : 'вимкнено');
+    return [
+        `Команди: typecheck — ${describe(commands.typecheck)};`,
+        `lint — ${describe(commands.lint)};`,
+        `tests — ${describe(commands.test)}.`,
+    ].join(' ');
+}
 function cell(text) {
     return text.replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
 }
 
+;// CONCATENATED MODULE: external "node:fs"
+const external_node_fs_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:fs");
+;// CONCATENATED MODULE: external "node:path"
+const external_node_path_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:path");
+;// CONCATENATED MODULE: ./src/core/config.ts
+
+
+const DISABLED = new Set(['off', 'false', 'none', 'disabled']);
+const TYPECHECK_SCRIPTS = ['typecheck', 'type-check', 'check-types', 'tsc'];
+function detectCommands(repoDir) {
+    const pkg = readPackageJson(repoDir);
+    if (!pkg)
+        return { typecheck: null, lint: null, test: null };
+    const deps = { ...pkg.dependencies, ...pkg.devDependencies };
+    const pm = detectPackageManager(repoDir, pkg);
+    const exec = { pnpm: 'pnpm exec', yarn: 'yarn run', npm: 'npm exec --no --' }[pm];
+    const run = (script) => (pm === 'npm' ? `npm run --silent ${script}` : `${pm} run ${script}`);
+    const typecheckScript = TYPECHECK_SCRIPTS.find((name) => pkg.scripts?.[name]);
+    const typecheck = typecheckScript ? run(typecheckScript) : deps.typescript ? `${exec} tsc --noEmit` : null;
+    const lint = deps.eslint ? `${exec} eslint` : null;
+    const test = deps.vitest
+        ? `${exec} vitest related --run --passWithNoTests --reporter=json --outputFile={report} {files}`
+        : deps.jest
+            ? `${exec} jest --findRelatedTests --passWithNoTests --json --outputFile={report} {files}`
+            : null;
+    return { typecheck, lint, test };
+}
+function resolveCommands(detected, overrides) {
+    const pick = (key) => {
+        const value = overrides[key]?.trim();
+        if (!value)
+            return detected[key];
+        return DISABLED.has(value.toLowerCase()) ? null : value;
+    };
+    return { typecheck: pick('typecheck'), lint: pick('lint'), test: pick('test') };
+}
+function detectPackageManager(repoDir, pkg) {
+    const declared = pkg.packageManager?.split('@')[0];
+    if (declared === 'pnpm' || declared === 'yarn' || declared === 'npm')
+        return declared;
+    if ((0,external_node_fs_namespaceObject.existsSync)((0,external_node_path_namespaceObject.join)(repoDir, 'pnpm-lock.yaml')))
+        return 'pnpm';
+    if ((0,external_node_fs_namespaceObject.existsSync)((0,external_node_path_namespaceObject.join)(repoDir, 'yarn.lock')))
+        return 'yarn';
+    return 'npm';
+}
+function readPackageJson(repoDir) {
+    try {
+        return JSON.parse((0,external_node_fs_namespaceObject.readFileSync)((0,external_node_path_namespaceObject.join)(repoDir, 'package.json'), 'utf8'));
+    }
+    catch {
+        return undefined;
+    }
+}
+
+;// CONCATENATED MODULE: ./src/core/checks/diff.ts
+function added(before, after, key) {
+    const remaining = new Map();
+    for (const item of before) {
+        const k = key(item);
+        remaining.set(k, (remaining.get(k) ?? 0) + 1);
+    }
+    const result = [];
+    for (const item of after) {
+        const k = key(item);
+        const count = remaining.get(k) ?? 0;
+        if (count > 0)
+            remaining.set(k, count - 1);
+        else
+            result.push(item);
+    }
+    return result;
+}
+
+;// CONCATENATED MODULE: ./src/core/checks/paths.ts
+
+
+function rootDirs(dir) {
+    try {
+        return [dir, (0,external_node_fs_namespaceObject.realpathSync)(dir)];
+    }
+    catch {
+        return [dir];
+    }
+}
+function relativeTo(dirs, filePath) {
+    const candidates = dirs.map((dir) => (0,external_node_path_namespaceObject.relative)(dir, filePath).replace(/\\/g, '/'));
+    return candidates.find((path) => !path.startsWith('..')) ?? candidates[0] ?? filePath;
+}
+
+;// CONCATENATED MODULE: ./src/core/checks/eslint.ts
+
+function parseEslintJson(stdout, rootDirs) {
+    const start = stdout.indexOf('[');
+    const end = stdout.lastIndexOf(']');
+    if (start === -1 || end < start)
+        return undefined;
+    let results;
+    try {
+        results = JSON.parse(stdout.slice(start, end + 1));
+    }
+    catch {
+        return undefined;
+    }
+    if (!Array.isArray(results))
+        return undefined;
+    const problems = [];
+    for (const result of results) {
+        const file = relativeTo(rootDirs, result.filePath);
+        for (const message of result.messages ?? []) {
+            if (message.severity !== 1 && message.severity !== 2)
+                continue;
+            problems.push({
+                file,
+                line: message.line ?? 0,
+                ruleId: message.ruleId ?? 'parse-error',
+                severity: message.severity,
+                message: message.message,
+            });
+        }
+    }
+    return problems;
+}
+function eslintKey(problem) {
+    return `${problem.file}\0${problem.ruleId}\0${problem.severity}\0${problem.message}`;
+}
+function formatEslintProblem(problem) {
+    return `${problem.ruleId} у ${problem.file}:${problem.line}: ${problem.message}`;
+}
+
+;// CONCATENATED MODULE: ./src/core/checks/output.ts
+const ANSI = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
+function stripAnsi(text) {
+    return text.replace(ANSI, '');
+}
+function combinedOutput(result) {
+    return stripAnsi(`${result.stdout}\n${result.stderr}`);
+}
+function outputTail(result, maxLength = 200) {
+    const lines = combinedOutput(result)
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+    const tail = lines.slice(-2).join(' ').replace(/`/g, "'");
+    if (tail === '')
+        return 'вивід порожній';
+    return tail.length > maxLength ? `…${tail.slice(-maxLength)}` : tail;
+}
+function seconds(ms) {
+    return `${Math.round(ms / 100) / 10} с`;
+}
+
+;// CONCATENATED MODULE: ./src/core/graders/execution.ts
+
+const CODE_FILE = /\.[cm]?[jt]sx?$/i;
+function result(grader, status, score, evidence) {
+    return { grader, status, score, evidence };
+}
+async function runExecutionCheck(grader, command, rec, ctx, check) {
+    if (rec.suggestion === undefined)
+        return result(grader, 'skip', 0, 'Немає блоку suggestion, нічого запускати.');
+    if (command === null)
+        return result(grader, 'skip', 0, 'Команду для цієї перевірки не задано.');
+    if (!ctx.workspace)
+        return result(grader, 'skip', 0, 'Виконання коду не налаштовано.');
+    const prepared = await ctx.workspace.prepare(rec);
+    if (!prepared.ok)
+        return result(grader, 'skip', 0, `Перевірку не запущено: ${prepared.reason}.`);
+    if (!prepared.sandbox.files.some((file) => CODE_FILE.test(file))) {
+        return result(grader, 'skip', 0, 'Змінений файл не є кодом JavaScript/TypeScript.');
+    }
+    return check(prepared.sandbox, ctx.workspace);
+}
+async function runBeforeAfter(workspace, sandbox, command) {
+    const before = await workspace.run(sandbox.before, command);
+    const after = await workspace.run(sandbox.after, command);
+    return { before, after };
+}
+function timeoutResult(grader, ...runs) {
+    const slow = runs.find((run) => run.timedOut);
+    if (!slow)
+        return undefined;
+    return result(grader, 'skip', 0, `Перевищено ліміт часу: команда працювала ${seconds(slow.durationMs)}.`);
+}
+function shellQuote(value) {
+    return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+function shorten(text, maxLength = 200) {
+    const single = text.replace(/\s+/g, ' ').trim();
+    return single.length > maxLength ? `${single.slice(0, maxLength - 1)}…` : single;
+}
+
+;// CONCATENATED MODULE: ./src/core/graders/lint.ts
+
+
+
+
+
+const NAME = 'lint';
+function createLintGrader(command) {
+    return {
+        name: NAME,
+        kind: 'execution',
+        grade: (rec, ctx) => runExecutionCheck(NAME, command, rec, ctx, async (sandbox, workspace) => {
+            const files = sandbox.files.map(shellQuote).join(' ');
+            const { before, after } = await runBeforeAfter(workspace, sandbox, `${command} --format json -- ${files}`);
+            const timeout = timeoutResult(NAME, before, after);
+            if (timeout)
+                return timeout;
+            const beforeProblems = parseEslintJson(before.stdout, rootDirs(sandbox.before));
+            if (!beforeProblems) {
+                return result(NAME, 'skip', 0, `ESLint не працює навіть без зміни: ${outputTail(before)}`);
+            }
+            const afterProblems = parseEslintJson(after.stdout, rootDirs(sandbox.after));
+            if (!afterProblems) {
+                return result(NAME, 'fail', 0, `Після зміни ESLint завершився з помилкою: ${outputTail(after)}`);
+            }
+            const newErrors = added(errors(beforeProblems), errors(afterProblems), eslintKey);
+            if (newErrors.length > 0) {
+                const first = shorten(formatEslintProblem(newErrors[0]));
+                return result(NAME, 'fail', 0, `Зміна додає помилок ESLint: ${newErrors.length}. Перша: ${first}`);
+            }
+            const newWarnings = added(warnings(beforeProblems), warnings(afterProblems), eslintKey);
+            if (newWarnings.length > 0) {
+                const first = shorten(formatEslintProblem(newWarnings[0]));
+                return result(NAME, 'pass', 0.5, `Зміна додає попереджень ESLint: ${newWarnings.length}. Перше: ${first}`);
+            }
+            const fixed = added(afterProblems, beforeProblems, eslintKey);
+            if (fixed.length > 0) {
+                return result(NAME, 'pass', 1, `Зміна прибирає проблем ESLint: ${fixed.length} і не додає нових.`);
+            }
+            return result(NAME, 'pass', 1, 'Зміна не додає проблем ESLint.');
+        }),
+    };
+}
+function errors(problems) {
+    return problems.filter((problem) => problem.severity === 2);
+}
+function warnings(problems) {
+    return problems.filter((problem) => problem.severity === 1);
+}
+
+;// CONCATENATED MODULE: ./src/core/graders/suggestion-applies.ts
+
+const suggestion_applies_NAME = 'suggestion-applies';
+const suggestionApplies = {
+    name: suggestion_applies_NAME,
+    kind: 'static',
+    async grade(rec, ctx) {
+        if (rec.suggestion === undefined) {
+            return { grader: suggestion_applies_NAME, status: 'skip', score: 0, evidence: 'Немає блоку suggestion.' };
+        }
+        if (!ctx.workspace) {
+            return { grader: suggestion_applies_NAME, status: 'skip', score: 0, evidence: 'Робочу теку не налаштовано.' };
+        }
+        const prepared = await ctx.workspace.prepare(rec);
+        if (prepared.ok) {
+            return {
+                grader: suggestion_applies_NAME,
+                status: 'pass',
+                score: 1,
+                evidence: `Suggestion застосовується до ${formatLocation(rec)}.`,
+            };
+        }
+        return { grader: suggestion_applies_NAME, status: prepared.status, score: 0, evidence: capitalize(prepared.reason) + '.' };
+    },
+};
+function capitalize(text) {
+    return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
 ;// CONCATENATED MODULE: ./src/core/graders/suggestion-present.ts
-const NAME = 'suggestion-present';
+const suggestion_present_NAME = 'suggestion-present';
 const suggestionPresent = {
-    name: NAME,
+    name: suggestion_present_NAME,
     kind: 'static',
     async grade(rec) {
         if (rec.suggestion === undefined) {
             return {
-                grader: NAME,
+                grader: suggestion_present_NAME,
                 status: 'skip',
                 score: 0,
                 evidence: 'Коментар не містить блоку suggestion: це лише текстова рекомендація.',
@@ -37630,14 +37911,524 @@ const suggestionPresent = {
         const evidence = rec.suggestion === ''
             ? 'Коментар містить порожній блок suggestion: пропонує видалити рядки.'
             : `Коментар містить блок suggestion (рядків коду: ${rec.suggestion.split('\n').length}).`;
-        return { grader: NAME, status: 'pass', score: 1, evidence };
+        return { grader: suggestion_present_NAME, status: 'pass', score: 1, evidence };
     },
 };
+
+;// CONCATENATED MODULE: external "node:fs/promises"
+const promises_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:fs/promises");
+;// CONCATENATED MODULE: ./src/core/checks/test-report.ts
+
+function parseTestReport(json, dirs) {
+    let report;
+    try {
+        report = JSON.parse(json);
+    }
+    catch {
+        return undefined;
+    }
+    if (!Array.isArray(report.testResults))
+        return undefined;
+    const cases = [];
+    for (const suite of report.testResults) {
+        const file = suite.name ? relativeTo(dirs, suite.name) : '?';
+        const assertions = suite.assertionResults ?? [];
+        for (const assertion of assertions) {
+            cases.push({
+                id: `${file} > ${assertion.fullName ?? assertion.title ?? '?'}`,
+                status: normalizeStatus(assertion.status),
+            });
+        }
+        if (suite.status === 'failed' && !assertions.some((a) => a.status === 'failed')) {
+            cases.push({ id: `${file} > (файл тестів)`, status: 'failed' });
+        }
+    }
+    return cases;
+}
+function compareTests(before, after) {
+    const statusBefore = new Map(before.map((test) => [test.id, test.status]));
+    const statusAfter = new Map(after.map((test) => [test.id, test.status]));
+    const broken = after
+        .filter((test) => test.status === 'failed' && statusBefore.get(test.id) !== 'failed')
+        .map((test) => test.id);
+    const fixed = before
+        .filter((test) => test.status === 'failed' && statusAfter.get(test.id) === 'passed')
+        .map((test) => test.id);
+    return {
+        broken,
+        fixed,
+        passingAfter: after.filter((test) => test.status === 'passed').length,
+        failingBefore: before.filter((test) => test.status === 'failed').length,
+        total: after.length,
+    };
+}
+function normalizeStatus(status) {
+    if (status === 'passed')
+        return 'passed';
+    if (status === 'failed')
+        return 'failed';
+    return 'skipped';
+}
+
+;// CONCATENATED MODULE: ./src/core/graders/tests.ts
+
+
+
+
+
+
+const tests_NAME = 'tests';
+const REPORT_FILE = 'review-evals-tests.json';
+const NO_TESTS = /no test files found|no tests found/i;
+function createTestsGrader(command) {
+    return {
+        name: tests_NAME,
+        kind: 'execution',
+        grade: (rec, ctx) => runExecutionCheck(tests_NAME, command, rec, ctx, async (sandbox, workspace) => {
+            const template = command ?? '';
+            const files = sandbox.files.map(shellQuote).join(' ');
+            const fullCommand = template.replaceAll('{files}', files).replaceAll('{report}', REPORT_FILE);
+            const { before, after } = await runBeforeAfter(workspace, sandbox, fullCommand);
+            const timeout = timeoutResult(tests_NAME, before, after);
+            if (timeout)
+                return timeout;
+            if (hasNoTests(before) && hasNoTests(after))
+                return noRelatedTests();
+            if (template.includes('{report}')) {
+                const beforeTests = await readReport(sandbox.before);
+                const afterTests = await readReport(sandbox.after);
+                if (beforeTests && afterTests)
+                    return judgeReports(beforeTests, afterTests);
+            }
+            return judgeExitCodes(before, after);
+        }),
+    };
+}
+function judgeReports(before, after) {
+    if (before.length === 0 && after.length === 0)
+        return noRelatedTests();
+    const comparison = compareTests(before, after);
+    if (comparison.broken.length > 0) {
+        const first = shorten(comparison.broken[0]);
+        return result(tests_NAME, 'fail', 0, `Зміна ламає тестів: ${comparison.broken.length}. Перший: ${first}`);
+    }
+    if (comparison.passingAfter === 0) {
+        return result(tests_NAME, 'skip', 0, `Жоден пов'язаний тест не проходить навіть без зміни (падають: ${comparison.failingBefore}).`);
+    }
+    const note = comparison.failingBefore > 0 ? ` Ще до зміни падали: ${comparison.failingBefore}, їх не враховано.` : '';
+    if (comparison.fixed.length > 0) {
+        return result(tests_NAME, 'pass', 1, `Зміна виправляє тестів: ${comparison.fixed.length}, нових падінь немає.${note}`);
+    }
+    return result(tests_NAME, 'pass', 1, `Тести проходять: ${comparison.passingAfter} з ${comparison.total}, нових падінь немає.${note}`);
+}
+function judgeExitCodes(before, after) {
+    const passedBefore = before.exitCode === 0;
+    const passedAfter = after.exitCode === 0;
+    if (passedBefore && passedAfter)
+        return result(tests_NAME, 'pass', 1, 'Тести проходять до і після зміни.');
+    if (passedBefore)
+        return result(tests_NAME, 'fail', 0, `Зміна ламає тести: ${outputTail(after)}`);
+    if (passedAfter)
+        return result(tests_NAME, 'pass', 1, 'Зміна виправляє тести, які падали до неї.');
+    return result(tests_NAME, 'skip', 0, `Тести падали ще до зміни: ${outputTail(before)}`);
+}
+function noRelatedTests() {
+    return result(tests_NAME, 'skip', 0, "Немає тестів, пов'язаних зі зміненим файлом.");
+}
+async function readReport(dir) {
+    try {
+        return parseTestReport(await (0,promises_namespaceObject.readFile)((0,external_node_path_namespaceObject.join)(dir, REPORT_FILE), 'utf8'), rootDirs(dir));
+    }
+    catch {
+        return undefined;
+    }
+}
+function hasNoTests(run) {
+    return NO_TESTS.test(combinedOutput(run));
+}
+
+;// CONCATENATED MODULE: ./src/core/checks/tsc.ts
+const PLAIN = /^(.+?)\((\d+),\d+\): error (TS\d+): (.*)$/;
+const PRETTY = /^(.+?):(\d+):\d+ - error (TS\d+): (.*)$/;
+const GLOBAL = /^error (TS\d+): (.*)$/;
+function parseTscOutput(output) {
+    const diagnostics = [];
+    for (const raw of output.split(/\r?\n/)) {
+        const line = raw.trim();
+        const match = PLAIN.exec(line) ?? PRETTY.exec(line);
+        if (match) {
+            diagnostics.push({
+                file: normalizePath(match[1] ?? ''),
+                line: Number(match[2]),
+                code: match[3] ?? '',
+                message: match[4] ?? '',
+            });
+            continue;
+        }
+        const global = GLOBAL.exec(line);
+        if (global)
+            diagnostics.push({ file: '', line: 0, code: global[1] ?? '', message: global[2] ?? '' });
+    }
+    return diagnostics;
+}
+function tscKey(diagnostic) {
+    return `${diagnostic.file}\0${diagnostic.code}\0${diagnostic.message}`;
+}
+function formatTscDiagnostic(diagnostic) {
+    const where = diagnostic.file ? `${diagnostic.file}:${diagnostic.line}` : 'проєкт';
+    return `${diagnostic.code} у ${where}: ${diagnostic.message}`;
+}
+function normalizePath(path) {
+    return path.replace(/\\/g, '/').replace(/^\.\//, '');
+}
+
+;// CONCATENATED MODULE: ./src/core/graders/typecheck.ts
+
+
+
+
+const typecheck_NAME = 'typecheck';
+function createTypecheckGrader(command) {
+    return {
+        name: typecheck_NAME,
+        kind: 'execution',
+        grade: (rec, ctx) => runExecutionCheck(typecheck_NAME, command, rec, ctx, async (sandbox, workspace) => {
+            const { before, after } = await runBeforeAfter(workspace, sandbox, command ?? '');
+            const timeout = timeoutResult(typecheck_NAME, before, after);
+            if (timeout)
+                return timeout;
+            const beforeDiagnostics = parseTscOutput(combinedOutput(before));
+            const afterDiagnostics = parseTscOutput(combinedOutput(after));
+            if (before.exitCode !== 0 && beforeDiagnostics.length === 0) {
+                return result(typecheck_NAME, 'skip', 0, `Перевірка типів не працює навіть без зміни: ${outputTail(before)}`);
+            }
+            const introduced = added(beforeDiagnostics, afterDiagnostics, tscKey);
+            if (introduced.length > 0) {
+                const first = shorten(formatTscDiagnostic(introduced[0]));
+                return result(typecheck_NAME, 'fail', 0, `Зміна додає помилок TypeScript: ${introduced.length}. Перша: ${first}`);
+            }
+            if (after.exitCode !== 0 && before.exitCode === 0) {
+                return result(typecheck_NAME, 'fail', 0, `Після зміни перевірка типів завершилась з помилкою: ${outputTail(after)}`);
+            }
+            const fixed = added(afterDiagnostics, beforeDiagnostics, tscKey);
+            if (fixed.length > 0) {
+                return result(typecheck_NAME, 'pass', 1, `Зміна виправляє помилок TypeScript: ${fixed.length} і не додає нових.`);
+            }
+            return result(typecheck_NAME, 'pass', 1, 'Зміна не додає помилок TypeScript.');
+        }),
+    };
+}
 
 ;// CONCATENATED MODULE: ./src/core/graders/index.ts
 
 
-const defaultGraders = [suggestionPresent];
+
+
+
+
+function createDefaultGraders(commands) {
+    return [
+        suggestionPresent,
+        suggestionApplies,
+        createTypecheckGrader(commands.typecheck),
+        createLintGrader(commands.lint),
+        createTestsGrader(commands.test),
+    ];
+}
+
+;// CONCATENATED MODULE: external "node:child_process"
+const external_node_child_process_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:child_process");
+;// CONCATENATED MODULE: ./src/core/workspace/exec.ts
+
+const KILL_GRACE_MS = 2000;
+function runCommand(command, options) {
+    const started = Date.now();
+    const limit = options.maxOutputBytes ?? 5 * 1024 * 1024;
+    return new Promise((resolve) => {
+        const child = (0,external_node_child_process_namespaceObject.spawn)(command, {
+            cwd: options.cwd,
+            env: options.env ?? process.env,
+            shell: true,
+            detached: process.platform !== 'win32',
+            stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        const stdout = new OutputBuffer(limit);
+        const stderr = new OutputBuffer(limit);
+        child.stdout.on('data', (chunk) => stdout.push(chunk));
+        child.stderr.on('data', (chunk) => stderr.push(chunk));
+        let timedOut = false;
+        let settled = false;
+        const killTimers = [];
+        const timer = setTimeout(() => {
+            timedOut = true;
+            kill(child.pid, 'SIGTERM');
+            killTimers.push(setTimeout(() => kill(child.pid, 'SIGKILL'), KILL_GRACE_MS), setTimeout(() => {
+                child.stdout.destroy();
+                child.stderr.destroy();
+                finish(null);
+            }, KILL_GRACE_MS * 2));
+        }, options.timeoutMs);
+        const finish = (exitCode, extraError) => {
+            if (settled)
+                return;
+            settled = true;
+            clearTimeout(timer);
+            killTimers.forEach(clearTimeout);
+            if (extraError)
+                stderr.push(Buffer.from(extraError));
+            resolve({
+                command,
+                exitCode: timedOut ? null : exitCode,
+                stdout: stdout.text(),
+                stderr: stderr.text(),
+                timedOut,
+                durationMs: Date.now() - started,
+            });
+        };
+        child.on('error', (error) => finish(null, error.message));
+        child.on('close', (code) => finish(code));
+    });
+}
+function kill(pid, signal) {
+    if (pid === undefined)
+        return;
+    try {
+        process.kill(process.platform === 'win32' ? pid : -pid, signal);
+    }
+    catch {
+        try {
+            process.kill(pid, signal);
+        }
+        catch {
+            return;
+        }
+    }
+}
+class OutputBuffer {
+    limit;
+    chunks = [];
+    size = 0;
+    truncated = false;
+    constructor(limit) {
+        this.limit = limit;
+    }
+    push(chunk) {
+        if (this.size >= this.limit) {
+            this.truncated = true;
+            return;
+        }
+        const room = this.limit - this.size;
+        const part = chunk.length > room ? chunk.subarray(0, room) : chunk;
+        if (part.length < chunk.length)
+            this.truncated = true;
+        this.chunks.push(part);
+        this.size += part.length;
+    }
+    text() {
+        const text = Buffer.concat(this.chunks).toString('utf8');
+        return this.truncated ? `${text}\n[вивід обрізано]` : text;
+    }
+}
+
+;// CONCATENATED MODULE: ./src/core/workspace/disabled-workspace.ts
+class DisabledWorkspace {
+    reason;
+    constructor(reason) {
+        this.reason = reason;
+    }
+    async prepare() {
+        return { ok: false, status: 'skip', reason: this.reason };
+    }
+    async run(_dir, command) {
+        return { command, exitCode: null, stdout: '', stderr: this.reason, timedOut: false, durationMs: 0 };
+    }
+}
+
+// EXTERNAL MODULE: external "node:util"
+var external_node_util_ = __nccwpck_require__(7975);
+;// CONCATENATED MODULE: ./src/core/workspace/apply.ts
+function applySuggestion(content, startLine, endLine, suggestion) {
+    const eol = content.includes('\r\n') ? '\r\n' : '\n';
+    const hasFinalEol = content.endsWith(eol);
+    const body = hasFinalEol ? content.slice(0, -eol.length) : content;
+    const lines = body === '' ? [] : body.split(eol);
+    if (!Number.isInteger(startLine) || !Number.isInteger(endLine) || startLine < 1 || endLine < startLine) {
+        throw new Error(`некоректний діапазон рядків ${startLine}-${endLine}`);
+    }
+    if (endLine > lines.length) {
+        throw new Error(`рядки ${startLine}-${endLine} виходять за межі файлу (${lines.length} рядків)`);
+    }
+    const replacement = suggestion === '' ? [] : suggestion.split('\n');
+    const updated = [...lines.slice(0, startLine - 1), ...replacement, ...lines.slice(endLine)];
+    const joined = updated.join(eol);
+    return hasFinalEol && updated.length > 0 ? joined + eol : joined;
+}
+
+;// CONCATENATED MODULE: ./src/core/workspace/env.ts
+const SECRET_KEY = /^(INPUT_|ACTIONS_)|^(GITHUB_TOKEN|GH_TOKEN|GITHUB_PAT)$/i;
+function commandEnv(source = process.env) {
+    const env = {};
+    for (const [key, value] of Object.entries(source)) {
+        if (value !== undefined && !SECRET_KEY.test(key))
+            env[key] = value;
+    }
+    return { ...env, CI: 'true', FORCE_COLOR: '0', NO_COLOR: '1' };
+}
+
+;// CONCATENATED MODULE: ./src/core/workspace/git-workspace.ts
+
+
+
+
+
+
+
+
+
+const execFileAsync = (0,external_node_util_.promisify)(external_node_child_process_namespaceObject.execFile);
+class GitWorkspace {
+    options;
+    baselines = new Map();
+    sandboxes = new Map();
+    runs = new Map();
+    worktrees = [];
+    env;
+    constructor(options) {
+        this.options = options;
+        this.env = options.env ?? commandEnv();
+    }
+    prepare(rec) {
+        let sandbox = this.sandboxes.get(rec.id);
+        if (!sandbox) {
+            sandbox = this.createSandbox(rec);
+            this.sandboxes.set(rec.id, sandbox);
+        }
+        return sandbox;
+    }
+    run(dir, command) {
+        const key = `${dir}\0${command}`;
+        let result = this.runs.get(key);
+        if (!result) {
+            result = runCommand(command, { cwd: dir, timeoutMs: this.options.timeoutMs, env: this.env });
+            this.runs.set(key, result);
+        }
+        return result;
+    }
+    async dispose() {
+        for (const dir of this.worktrees.reverse()) {
+            await this.git(['worktree', 'remove', '--force', dir]).catch(() => (0,promises_namespaceObject.rm)(dir, { recursive: true, force: true }));
+        }
+        await this.git(['worktree', 'prune']).catch(() => undefined);
+        await (0,promises_namespaceObject.rm)(this.options.tempDir, { recursive: true, force: true });
+    }
+    async createSandbox(rec) {
+        if (rec.suggestion === undefined)
+            return skip('коментар не містить блоку suggestion');
+        if (!rec.commitId)
+            return skip('невідомий коміт, до якого залишено коментар');
+        if (rec.endLine === null)
+            return skip('коментар до файлу без рядків');
+        if (!isSafeRelativePath(rec.path))
+            return fail(`некоректний шлях файлу: ${rec.path}`);
+        let before;
+        try {
+            before = await this.baseline(rec.commitId);
+        }
+        catch (error) {
+            return skip(`не вдалося отримати коміт ${rec.commitId.slice(0, 7)}: ${errorMessage(error)}`);
+        }
+        let original;
+        try {
+            original = await (0,promises_namespaceObject.readFile)((0,external_node_path_namespaceObject.join)(before, rec.path), 'utf8');
+        }
+        catch {
+            return fail(`файлу ${rec.path} немає в коміті ${rec.commitId.slice(0, 7)}`);
+        }
+        let updated;
+        try {
+            updated = applySuggestion(original, rec.startLine ?? rec.endLine, rec.endLine, rec.suggestion);
+        }
+        catch (error) {
+            return fail(`suggestion не застосовується: ${errorMessage(error)}`);
+        }
+        if (updated === original)
+            return fail('suggestion збігається з поточним кодом і нічого не змінює');
+        try {
+            const after = await this.addWorktree(rec.commitId, `rec-${safeName(rec.id)}`);
+            await (0,promises_namespaceObject.writeFile)((0,external_node_path_namespaceObject.join)(after, rec.path), updated, 'utf8');
+            return { ok: true, sandbox: { before, after, files: [rec.path] } };
+        }
+        catch (error) {
+            return skip(`не вдалося підготувати робочу теку: ${errorMessage(error)}`);
+        }
+    }
+    baseline(commit) {
+        let dir = this.baselines.get(commit);
+        if (!dir) {
+            dir = this.ensureCommit(commit).then(() => this.addWorktree(commit, `base-${safeName(commit)}`));
+            this.baselines.set(commit, dir);
+        }
+        return dir;
+    }
+    async ensureCommit(commit) {
+        const present = await this.git(['cat-file', '-e', `${commit}^{commit}`]).then(() => true, () => false);
+        if (present)
+            return;
+        const fetchArgs = ['fetch', '--no-tags', '--depth=1', 'origin', commit];
+        try {
+            await this.git(fetchArgs);
+        }
+        catch (error) {
+            if (!this.options.fetchEnv)
+                throw error;
+            await this.git(fetchArgs, this.options.fetchEnv);
+        }
+    }
+    async addWorktree(commit, name) {
+        const dir = (0,external_node_path_namespaceObject.join)(this.options.tempDir, name);
+        await (0,promises_namespaceObject.mkdir)(this.options.tempDir, { recursive: true });
+        await this.git(['worktree', 'add', '--detach', '--force', dir, commit]);
+        this.worktrees.push(dir);
+        const nodeModules = (0,external_node_path_namespaceObject.join)(this.options.repoDir, 'node_modules');
+        if (this.options.linkNodeModules !== false && (0,external_node_fs_namespaceObject.existsSync)(nodeModules) && !(0,external_node_fs_namespaceObject.existsSync)((0,external_node_path_namespaceObject.join)(dir, 'node_modules'))) {
+            await (0,promises_namespaceObject.symlink)(nodeModules, (0,external_node_path_namespaceObject.join)(dir, 'node_modules'), 'dir');
+        }
+        return dir;
+    }
+    async git(args, extraEnv) {
+        const { stdout } = await execFileAsync('git', args, {
+            cwd: this.options.repoDir,
+            env: { ...process.env, ...extraEnv, GIT_TERMINAL_PROMPT: '0' },
+            maxBuffer: 16 * 1024 * 1024,
+        }).catch((error) => {
+            const stderr = error.stderr?.trim();
+            throw new Error(stderr ? lastLine(stderr) : `git ${args[0]} завершився з помилкою`);
+        });
+        return stdout;
+    }
+}
+function skip(reason) {
+    return { ok: false, status: 'skip', reason };
+}
+function fail(reason) {
+    return { ok: false, status: 'fail', reason };
+}
+function safeName(value) {
+    return value.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 40);
+}
+function lastLine(text) {
+    return text.split(/\r?\n/).filter(Boolean).at(-1) ?? text;
+}
+function isSafeRelativePath(path) {
+    return path !== '' && !(0,external_node_path_namespaceObject.isAbsolute)(path) && !path.split(/[\\/]/).includes('..');
+}
+
+;// CONCATENATED MODULE: ./src/core/workspace/index.ts
+
+
+
+
+
 
 ;// CONCATENATED MODULE: ./src/core/index.ts
 
@@ -37649,9 +38440,79 @@ const defaultGraders = [suggestionPresent];
 
 
 
+
+
+;// CONCATENATED MODULE: ./src/action/inputs.ts
+
+
+const DEFAULT_TIMEOUT_SECONDS = 300;
+function readInputs() {
+    return {
+        token: getInput('github-token', { required: true }),
+        mode: parseMode(getInput('mode')),
+        commands: {
+            typecheck: getInput('typecheck-command'),
+            lint: getInput('lint-command'),
+            test: getInput('test-command'),
+        },
+        timeoutMs: parseTimeoutSeconds(getInput('timeout-seconds')) * 1000,
+        allowForks: getInput('allow-forks').trim().toLowerCase() === 'true',
+    };
+}
+function parseTimeoutSeconds(value) {
+    if (value.trim() === '')
+        return DEFAULT_TIMEOUT_SECONDS;
+    const seconds = Number(value);
+    if (!Number.isFinite(seconds) || seconds <= 0) {
+        throw new Error(`Некоректне значення timeout-seconds: "${value}". Потрібне додатне число.`);
+    }
+    return seconds;
+}
+
 ;// CONCATENATED MODULE: ./src/action/pull-request.ts
 function resolvePullRequestNumber(payload) {
     return payload.pull_request?.number ?? payload.workflow_run?.pull_requests?.[0]?.number;
+}
+function isForkPullRequest(payload) {
+    const base = payload.repository?.full_name;
+    const head = payload.pull_request?.head?.repo?.full_name ?? payload.workflow_run?.head_repository?.full_name;
+    return Boolean(base && head && base !== head);
+}
+
+;// CONCATENATED MODULE: external "node:os"
+const external_node_os_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:os");
+;// CONCATENATED MODULE: ./src/action/workspace.ts
+
+
+
+
+
+function createWorkspace(settings) {
+    if (settings.fork && !settings.allowForks) {
+        return disabled('виконання коду з PR із форку вимкнено (allow-forks: false)');
+    }
+    if (!(0,external_node_fs_namespaceObject.existsSync)((0,external_node_path_namespaceObject.join)(settings.repoDir, '.git'))) {
+        return disabled('репозиторій не завантажено, додайте крок actions/checkout');
+    }
+    const workspace = new GitWorkspace({
+        repoDir: settings.repoDir,
+        tempDir: (0,external_node_path_namespaceObject.join)(process.env.RUNNER_TEMP ?? (0,external_node_os_namespaceObject.tmpdir)(), `review-evals-${settings.runId}-${Date.now()}`),
+        timeoutMs: settings.timeoutMs,
+        fetchEnv: authEnv(settings.token, settings.serverUrl),
+    });
+    return { workspace, dispose: () => workspace.dispose() };
+}
+function disabled(reason) {
+    return { workspace: new DisabledWorkspace(reason), dispose: async () => undefined };
+}
+function authEnv(token, serverUrl) {
+    const basic = Buffer.from(`x-access-token:${token}`).toString('base64');
+    core_setSecret(basic);
+    return {
+        GIT_CONFIG_COUNT: '1',
+        GIT_CONFIG_KEY_0: `http.${serverUrl}/.extraheader`,
+        GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${basic}`,
+    };
 }
 
 ;// CONCATENATED MODULE: ./src/action/index.ts
@@ -37659,11 +38520,13 @@ function resolvePullRequestNumber(payload) {
 
 
 
+
+
+const action_STATUS_ICON = { pass: '✔', fail: '✘', skip: '–' };
 async function run() {
-    const token = getInput('github-token', { required: true });
-    const mode = parseMode(getInput('mode'));
-    if (mode !== 'annotate') {
-        warning(`Режим "${mode}" ще не реалізовано (етап 4). Працюю в режимі annotate.`);
+    const inputs = readInputs();
+    if (inputs.mode !== 'annotate') {
+        warning(`Режим "${inputs.mode}" ще не реалізовано (етап 4). Працюю в режимі annotate.`);
     }
     const { /* context */ "_": context } = github_namespaceObject;
     const pullNumber = resolvePullRequestNumber(context.payload);
@@ -37673,7 +38536,7 @@ async function run() {
         return;
     }
     const { owner, repo } = context.repo;
-    const octokit = getOctokit(token);
+    const octokit = getOctokit(inputs.token);
     const comments = await octokit.paginate(octokit.rest.pulls.listReviewComments, {
         owner,
         repo,
@@ -37683,35 +38546,58 @@ async function run() {
     const { pending, alreadyEvaluated } = selectPendingComments(comments);
     info(`PR #${pullNumber}: коментарів ${comments.length}, нових для оцінювання ${pending.length}, ` +
         `вже оцінено ${alreadyEvaluated.length}.`);
-    const ctx = { repoDir: process.env.GITHUB_WORKSPACE ?? process.cwd() };
+    const repoDir = process.env.GITHUB_WORKSPACE ?? process.cwd();
+    const commands = resolveCommands(detectCommands(repoDir), inputs.commands);
+    info(`Команди: typecheck=${commands.typecheck}, lint=${commands.lint}, tests=${commands.test}`);
+    const graders = createDefaultGraders(commands);
+    const { workspace, dispose } = createWorkspace({
+        repoDir,
+        token: inputs.token,
+        serverUrl: context.serverUrl,
+        runId: context.runId,
+        timeoutMs: inputs.timeoutMs,
+        fork: isForkPullRequest(context.payload),
+        allowForks: inputs.allowForks,
+    });
     const evaluations = [];
     const failures = [];
-    for (const comment of pending) {
-        try {
-            const evaluation = await evaluate(parseRecommendation(comment), defaultGraders, ctx);
-            await octokit.rest.pulls.createReplyForReviewComment({
-                owner,
-                repo,
-                pull_number: pullNumber,
-                comment_id: comment.id,
-                body: renderReply(evaluation),
+    try {
+        for (const comment of pending) {
+            const rec = parseRecommendation(comment);
+            await group(`Коментар ${comment.id} (${formatLocation(rec)})`, async () => {
+                try {
+                    const evaluation = await evaluate(rec, graders, { repoDir, workspace });
+                    for (const r of evaluation.results)
+                        info(`${action_STATUS_ICON[r.status]} ${r.grader}: ${r.evidence}`);
+                    await octokit.rest.pulls.createReplyForReviewComment({
+                        owner,
+                        repo,
+                        pull_number: pullNumber,
+                        comment_id: comment.id,
+                        body: renderReply(evaluation),
+                    });
+                    evaluations.push(evaluation);
+                    info('Відповідь опубліковано.');
+                }
+                catch (error) {
+                    const message = `Коментар ${comment.id}: ${errorMessage(error)}`;
+                    failures.push(message);
+                    core_error(message);
+                }
             });
-            evaluations.push(evaluation);
-            info(`Коментар ${comment.id}: відповідь опубліковано.`);
         }
-        catch (error) {
-            const message = `Коментар ${comment.id}: ${errorMessage(error)}`;
-            failures.push(message);
-            core_error(message);
-        }
+    }
+    finally {
+        await dispose().catch((error) => warning(`Не вдалося прибрати робочі теки: ${errorMessage(error)}`));
     }
     await summary
         .addRaw(renderSummary({
         pullNumber,
-        mode,
+        mode: inputs.mode,
         evaluations,
         alreadyEvaluated: alreadyEvaluated.length,
         failed: failures.length,
+        commands,
     }), true)
         .write();
     if (failures.length > 0) {
