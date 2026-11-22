@@ -42,12 +42,21 @@ export function parseRecommendation(comment: ReviewComment): Recommendation {
     body: comment.body,
   };
 
+  const severity = extractSeverity(comment.body);
+  if (severity) rec.severity = severity;
   const suggestion = extractSuggestion(comment.body);
-  if (suggestion !== undefined) rec.suggestion = suggestion;
+  if (suggestion !== undefined) {
+    rec.suggestion = suggestion;
+    rec.suggestionOrigin = 'comment';
+  }
   if (commitId) rec.commitId = commitId;
   if (comment.html_url) rec.url = comment.html_url;
 
   return rec;
+}
+
+export function extractSeverity(body: string): string | undefined {
+  return /^\s*(?:\*\*)?\[([A-Za-z][\w-]{0,19})\]/.exec(body)?.[1]?.toLowerCase();
 }
 
 function isClosingFence(line: string, opening: string): boolean {

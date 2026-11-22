@@ -17,6 +17,7 @@ export interface WorkspaceSettings {
 export interface ActionWorkspace {
   workspace: Workspace;
   dispose(): Promise<void>;
+  dependenciesChanged(): boolean;
 }
 
 export function createWorkspace(settings: WorkspaceSettings): ActionWorkspace {
@@ -33,11 +34,15 @@ export function createWorkspace(settings: WorkspaceSettings): ActionWorkspace {
     timeoutMs: settings.timeoutMs,
     fetchEnv: authEnv(settings.token, settings.serverUrl),
   });
-  return { workspace, dispose: () => workspace.dispose() };
+  return {
+    workspace,
+    dispose: () => workspace.dispose(),
+    dependenciesChanged: () => workspace.dependenciesWereChanged,
+  };
 }
 
 function disabled(reason: string): ActionWorkspace {
-  return { workspace: new DisabledWorkspace(reason), dispose: async () => undefined };
+  return { workspace: new DisabledWorkspace(reason), dispose: async () => undefined, dependenciesChanged: () => false };
 }
 
 function authEnv(token: string, serverUrl: string): NodeJS.ProcessEnv {

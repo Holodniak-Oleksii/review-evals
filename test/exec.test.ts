@@ -49,9 +49,18 @@ describe('commandEnv', () => {
       GITHUB_TOKEN: 'secret',
       ACTIONS_RUNTIME_TOKEN: 'secret',
       ACTIONS_ID_TOKEN_REQUEST_TOKEN: 'secret',
+      ANTHROPIC_API_KEY: 'secret',
+      CLAUDE_CODE_OAUTH_TOKEN: 'secret',
       GITHUB_WORKSPACE: '/work',
     });
 
-    expect(env).toEqual({ PATH: '/bin', GITHUB_WORKSPACE: '/work', CI: 'true', FORCE_COLOR: '0', NO_COLOR: '1' });
+    expect(env).toEqual({
+      PATH: '/bin',
+      GITHUB_WORKSPACE: '/work',
+      CI: 'true',
+      FORCE_COLOR: '0',
+      NO_COLOR: '1',
+      pnpm_config_verify_deps_before_run: 'false',
+    });
   });
 });

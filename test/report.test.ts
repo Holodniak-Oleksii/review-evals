@@ -45,7 +45,7 @@ describe('renderReply', () => {
 });
 
 describe('renderSummary', () => {
-  it('будує таблицю «файл:рядки | джерело | результати»', () => {
+  it('будує таблицю «файл:рядки | джерело | довіра | результати»', () => {
     const md = renderSummary({
       pullNumber: 1,
       mode: 'annotate',
@@ -56,10 +56,10 @@ describe('renderSummary', () => {
 
     expect(md).toContain('## Review Evals — PR #1');
     expect(md).toContain('Вже оцінено раніше: 2.');
-    expect(md).toContain('| Файл:рядки | Джерело | Результати оцінювачів |');
+    expect(md).toContain('| Файл:рядки | Джерело | Довіра | Результати оцінювачів |');
     expect(md).toContain(
       '| [`src/App.tsx:10-12`](https://github.com/owner/demo/pull/1#discussion_r101) ' +
-        '| LLM (`claude[bot]`) | ✔ suggestion-present<br>✘ tsc<br>– tests |',
+        '| LLM (`claude[bot]`) | — | ✔ suggestion-present<br>✘ tsc<br>– tests |',
     );
   });
 

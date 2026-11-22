@@ -1,4 +1,8 @@
+import type { ModelClient } from './model/client';
+
 export type RecommendationSource = 'llm' | 'human';
+
+export type SuggestionOrigin = 'comment' | 'model';
 
 export interface Recommendation {
   id: string;
@@ -8,7 +12,9 @@ export interface Recommendation {
   startLine: number | null;
   endLine: number | null;
   body: string;
+  severity?: string;
   suggestion?: string;
+  suggestionOrigin?: SuggestionOrigin;
   commitId?: string;
   url?: string;
 }
@@ -42,6 +48,7 @@ export type SandboxResult =
   | { ok: false; status: 'fail' | 'skip'; reason: string };
 
 export interface Workspace {
+  checkout(commitId: string): Promise<string>;
   prepare(rec: Recommendation): Promise<SandboxResult>;
   run(dir: string, command: string): Promise<CommandResult>;
 }
@@ -49,6 +56,7 @@ export interface Workspace {
 export interface EvalContext {
   repoDir: string;
   workspace?: Workspace;
+  model?: ModelClient;
 }
 
 export type GraderKind = 'execution' | 'static' | 'model' | 'human';
@@ -59,13 +67,44 @@ export interface Grader {
   grade(rec: Recommendation, ctx: EvalContext): Promise<GradeResult>;
 }
 
+export interface Enrichment {
+  recommendation: Recommendation;
+  result: GradeResult;
+}
+
+export interface Enricher {
+  name: string;
+  kind: GraderKind;
+  enrich(rec: Recommendation, ctx: EvalContext): Promise<Enrichment>;
+}
+
+export type TrustLevel = 'high' | 'medium' | 'low';
+
+export type AggregationMethod = 'rules' | 'logistic';
+
+export interface TrustFactor {
+  feature: string;
+  contribution: number;
+}
+
+export interface TrustScore {
+  score: number;
+  level: TrustLevel;
+  method: AggregationMethod;
+  logit: number;
+  factors: TrustFactor[];
+  veto?: string;
+}
+
 export interface Evaluation {
   recommendation: Recommendation;
   results: GradeResult[];
+  trust?: TrustScore;
 }
 
 export interface ReviewComment {
   id: number;
+  node_id?: string;
   body: string;
   path: string;
   line?: number | null;

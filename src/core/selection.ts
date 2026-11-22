@@ -8,6 +8,7 @@ export interface CommentSelection<T> {
 
 export function selectPendingComments<T extends ReviewComment>(
   comments: readonly T[],
+  evaluatedIds: Iterable<string> = [],
 ): CommentSelection<T> {
   const answered = new Set<number>();
   for (const comment of comments) {
@@ -15,10 +16,11 @@ export function selectPendingComments<T extends ReviewComment>(
       answered.add(comment.in_reply_to_id);
     }
   }
+  for (const id of evaluatedIds) answered.add(Number(id));
 
-  const roots = comments.filter((comment) => comment.in_reply_to_id == null);
+  const roots = comments.filter((comment) => comment.in_reply_to_id == null && !hasMarker(comment.body));
   return {
-    pending: roots.filter((comment) => !answered.has(comment.id) && !hasMarker(comment.body)),
+    pending: roots.filter((comment) => !answered.has(comment.id)),
     alreadyEvaluated: roots.filter((comment) => answered.has(comment.id)),
   };
 }

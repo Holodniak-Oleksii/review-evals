@@ -12,15 +12,19 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "all": "npm run typecheck && npm test && npm run build"
+    "all": "npm run typecheck && npm test && npm run build",
+    "cli": "tsx src/cli/index.ts"
   },
   "dependencies": {
     "@actions/core": "^3.0.1",
-    "@actions/github": "^9.1.1"
+    "@actions/github": "^9.1.1",
+    "@anthropic-ai/sdk": "^1.12.0",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/node": "^24.19.2",
     "@vercel/ncc": "^0.45.0",
+    "tsx": "^4.23.15",
     "typescript": "~6.0.3",
     "vitest": "^5.1.1"
   }

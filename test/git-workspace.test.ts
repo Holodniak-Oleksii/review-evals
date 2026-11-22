@@ -106,3 +106,39 @@ describe('GitWorkspace', () => {
     expect(git('worktree', 'list')).not.toContain(join(root, 'extra'));
   });
 });
+
+describe('захист node_modules', () => {
+  it('зупиняє execution-перевірки, якщо команда змінила маркер встановлення', async () => {
+    const guardRoot = mkdtempSync(join(tmpdir(), 'review-evals-guard-'));
+    const guardRepo = join(guardRoot, 'repo');
+    mkdirSync(join(guardRepo, 'node_modules'), { recursive: true });
+    writeFileSync(join(guardRepo, '.gitignore'), 'node_modules\n');
+    writeFileSync(join(guardRepo, 'node_modules/.modules.yaml'), 'layoutVersion: 5\n');
+    writeFileSync(join(guardRepo, 'a.ts'), 'export const a = 1;\n');
+    const run = (...args: string[]) =>
+      execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@e.x', ...args], { cwd: guardRepo });
+    run('init', '-q');
+    run('add', '.');
+    run('commit', '-q', '-m', 'init');
+    const sha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: guardRepo, encoding: 'utf8' }).trim();
+
+    const guarded = new GitWorkspace({ repoDir: guardRepo, tempDir: join(guardRoot, 'wt'), timeoutMs: 10_000 });
+    try {
+      const first = makeRecommendation({ id: 'g1', path: 'a.ts', startLine: 1, endLine: 1, suggestion: 'export const a = 2;', commitId: sha });
+      const prepared = await guarded.prepare(first);
+      expect(prepared.ok).toBe(true);
+      if (!prepared.ok) return;
+
+      const touched = await guarded.run(prepared.sandbox.after, 'sleep 0.05 && echo changed >> node_modules/.modules.yaml');
+      expect(touched.exitCode).toBeNull();
+      expect(touched.stderr).toContain('execution-перевірки зупинено');
+      expect(guarded.dependenciesWereChanged).toBe(true);
+
+      const second = await guarded.prepare({ ...first, id: 'g2' });
+      expect(second).toMatchObject({ ok: false, status: 'skip' });
+    } finally {
+      await guarded.dispose();
+      rmSync(guardRoot, { recursive: true, force: true });
+    }
+  });
+});

@@ -23,6 +23,10 @@ class FakeWorkspace implements Workspace {
     private readonly outputs: Outputs = { before: {}, after: {} },
   ) {}
 
+  async checkout(): Promise<string> {
+    return 'before';
+  }
+
   async prepare(): Promise<SandboxResult> {
     return this.prepared;
   }

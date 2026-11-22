@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 import { promisify } from 'node:util';
@@ -20,18 +20,30 @@ export interface GitWorkspaceOptions {
   linkNodeModules?: boolean;
 }
 
+const INSTALL_MARKERS = ['.modules.yaml', '.package-lock.json', '.yarn-state.yml'];
+const DEPENDENCIES_CHANGED =
+  'команда змінила залежності в node_modules основного checkout, тому execution-перевірки зупинено';
+
 export class GitWorkspace implements Workspace {
   private readonly baselines = new Map<string, Promise<string>>();
   private readonly sandboxes = new Map<string, Promise<SandboxResult>>();
   private readonly runs = new Map<string, Promise<CommandResult>>();
   private readonly worktrees: string[] = [];
   private readonly env: NodeJS.ProcessEnv;
+  private readonly markers: Map<string, number>;
+  private dependenciesChanged = false;
 
   constructor(private readonly options: GitWorkspaceOptions) {
     this.env = options.env ?? commandEnv();
+    this.markers = snapshotMarkers(join(options.repoDir, 'node_modules'));
+  }
+
+  checkout(commitId: string): Promise<string> {
+    return this.baseline(commitId);
   }
 
   prepare(rec: Recommendation): Promise<SandboxResult> {
+    if (this.dependenciesChanged) return Promise.resolve(skip(DEPENDENCIES_CHANGED));
     let sandbox = this.sandboxes.get(rec.id);
     if (!sandbox) {
       sandbox = this.createSandbox(rec);
@@ -41,13 +53,30 @@ export class GitWorkspace implements Workspace {
   }
 
   run(dir: string, command: string): Promise<CommandResult> {
+    if (this.dependenciesChanged) {
+      return Promise.resolve({ command, exitCode: null, stdout: '', stderr: DEPENDENCIES_CHANGED, timedOut: false, durationMs: 0 });
+    }
     const key = `${dir}\0${command}`;
     let result = this.runs.get(key);
     if (!result) {
-      result = runCommand(command, { cwd: dir, timeoutMs: this.options.timeoutMs, env: this.env });
+      result = runCommand(command, { cwd: dir, timeoutMs: this.options.timeoutMs, env: this.env }).then((run) =>
+        this.checkDependencies(run),
+      );
       this.runs.set(key, result);
     }
     return result;
+  }
+
+  get dependenciesWereChanged(): boolean {
+    return this.dependenciesChanged;
+  }
+
+  private checkDependencies(run: CommandResult): CommandResult {
+    const now = snapshotMarkers(join(this.options.repoDir, 'node_modules'));
+    const changed = [...now].some(([path, mtime]) => this.markers.get(path) !== mtime);
+    if (!changed) return run;
+    this.dependenciesChanged = true;
+    return { ...run, exitCode: null, stderr: `${run.stderr}\n${DEPENDENCIES_CHANGED}` };
   }
 
   async dispose(): Promise<void> {
@@ -161,6 +190,19 @@ function safeName(value: string): string {
 
 function lastLine(text: string): string {
   return text.split(/\r?\n/).filter(Boolean).at(-1) ?? text;
+}
+
+function snapshotMarkers(nodeModules: string): Map<string, number> {
+  const snapshot = new Map<string, number>();
+  for (const marker of INSTALL_MARKERS) {
+    const path = join(nodeModules, marker);
+    try {
+      snapshot.set(path, statSync(path).mtimeMs);
+    } catch {
+      snapshot.set(path, -1);
+    }
+  }
+  return snapshot;
 }
 
 function isSafeRelativePath(path: string): boolean {

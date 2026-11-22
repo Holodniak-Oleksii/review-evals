@@ -17,6 +17,7 @@ describe('parseRecommendation', () => {
       endLine: 10,
       body: 'Краще без `let`:\n```suggestion\nconst count = 0;\n```',
       suggestion: 'const count = 0;',
+      suggestionOrigin: 'comment',
       commitId: 'head-sha',
       url: 'https://github.com/owner/demo/pull/1#discussion_r101',
     });

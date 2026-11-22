@@ -7,7 +7,7 @@ inputs:
     required: false
     default: ${{ github.token }}
   mode:
-    description: annotate | filter | hybrid
+    description: annotate (відповідати), filter (лише згортати недостовірні), hybrid (відповідати і згортати)
     required: false
     default: annotate
   typecheck-command:
@@ -30,6 +30,30 @@ inputs:
     description: Запускати код із PR з форків (небезпечно).
     required: false
     default: 'false'
+  anthropic-api-key:
+    description: Ключ Anthropic API для LLM-оцінювачів. Порожньо — LLM-оцінювачі вимкнено.
+    required: false
+    default: ''
+  model:
+    description: Модель Claude для LLM-оцінювачів.
+    required: false
+    default: claude-opus-5-5
+  aggregator:
+    description: auto (логістична регресія, якщо є weights.json, інакше правила) | rules | logistic
+    required: false
+    default: auto
+  weights-file:
+    description: Шлях до weights.json. Порожньо — weights.json у репозиторії Action.
+    required: false
+    default: ''
+  min-trust:
+    description: Поріг довіри від 0 до 1. У режимах filter і hybrid коментарі з нижчою довірою згортаються.
+    required: false
+    default: '0.3'
+  minimize-sources:
+    description: Чиї коментарі можна згортати. llm — лише ботів, all — усі.
+    required: false
+    default: llm
 
 runs:
   using: node24
