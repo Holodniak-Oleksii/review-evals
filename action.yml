@@ -1,0 +1,20 @@
+name: Review Evals
+description: Оцінює достовірність рекомендацій code review у pull request.
+
+inputs:
+  github-token:
+    description: Токен для GitHub API (потрібен pull-requests write)
+    required: false
+    default: ${{ github.token }}
+  mode:
+    description: annotate | filter | hybrid
+    required: false
+    default: annotate
+
+runs:
+  using: node24
+  main: dist/index.js
+
+branding:
+  icon: check-circle
+  color: green

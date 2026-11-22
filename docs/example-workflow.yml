@@ -1,0 +1,25 @@
+name: Review Evals
+
+on:
+  workflow_run:
+    workflows: ["Claude Auto Review"]
+    types: [completed]
+  pull_request_review:
+    types: [submitted]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: review-evals-${{ github.event.pull_request.number || github.event.workflow_run.pull_requests[0].number || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: <OWNER>/review-evals@main
+        with:
+          mode: annotate

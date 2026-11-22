@@ -1,0 +1,27 @@
+{
+  "name": "review-evals",
+  "version": "0.1.0",
+  "description": "Eval-фреймворк для оцінювання достовірності рекомендацій code review",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "ncc build src/action/index.ts -o dist --license licenses.txt",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "all": "npm run typecheck && npm test && npm run build"
+  },
+  "dependencies": {
+    "@actions/core": "^3.0.1",
+    "@actions/github": "^9.1.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "@vercel/ncc": "^0.45.0",
+    "typescript": "~6.0.3",
+    "vitest": "^5.1.1"
+  }
+}
